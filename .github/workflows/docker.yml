@@ -82,6 +82,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          context: machine-learning
           file: machine-learning/Dockerfile
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
