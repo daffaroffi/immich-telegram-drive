@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pipeline } from 'node:stream/promises';
 import { ConfigRepository } from 'src/repositories/config.repository.js';
@@ -60,6 +60,9 @@ export class TelegramRestoreService {
     }
 
     this.logger.warn(`Original file missing on disk, restoring ${assetId} from telegram`);
+
+    // The original may live several directories deep; recreate them before writing.
+    await mkdir(dirname(path), { recursive: true });
 
     const workDir = await mkdtemp(join(tmpdir(), 'tg-restore-'));
     try {
