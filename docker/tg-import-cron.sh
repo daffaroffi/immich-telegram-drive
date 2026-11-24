@@ -7,7 +7,7 @@ set -euo pipefail
 
 BASE=http://127.0.0.1:2283
 EMAIL="dapa@utusu.my.id"
-PASS_FILE=/root/immich-telegram/docker/.import-password
+PASS_FILE=/root/immich-telegram-drive/docker/.import-password
 LOG=/var/log/immich-telegram-import.log
 
 [ -f "$PASS_FILE" ] || { echo "no password file" >&2; exit 1; }
