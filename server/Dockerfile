@@ -1,0 +1,130 @@
+FROM ghcr.io/immich-app/base-server-dev:202611101105@sha256:174b605f52a3430c58295db1737d46a602cc076103aba60f33bdb8bb545e0b41 AS builder
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+  CI=1 \
+  COREPACK_HOME=/tmp \
+  PNPM_HOME=/buildcache/pnpm-store \
+  PATH="/buildcache/pnpm-store:$PATH"
+
+RUN npm install --global corepack@latest && \
+  corepack enable pnpm && \
+  pnpm config set store-dir "$PNPM_HOME"
+
+WORKDIR /usr/src/app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .pnpmfile.cjs ./
+
+FROM builder AS sdk
+
+COPY ./packages/sdk/package.json ./packages/sdk/package.json
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/sdk install --frozen-lockfile
+
+COPY ./packages/sdk ./packages/sdk/
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/sdk build
+
+FROM sdk AS plugin-sdk
+
+COPY ./packages/plugin-sdk/package.json ./packages/plugin-sdk/package.json
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/plugin-sdk install --frozen-lockfile
+
+COPY ./packages/plugin-sdk ./packages/plugin-sdk/
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/plugin-sdk build
+
+FROM plugin-sdk AS server
+
+COPY ./server/package.json ./server/package.json
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter immich install --frozen-lockfile
+
+COPY ./server ./server/
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
+  pnpm --filter immich build && \
+  pnpm --filter immich --prod --no-optional deploy /output/server-pruned
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
+  SHARP_FORCE_GLOBAL_LIBVIPS=true pnpm --config.verify-deps-before-run=false --dir /output/server-pruned/node_modules/sharp run build
+
+FROM sdk AS web
+
+COPY ./web/package.json ./web/package.json
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter immich-web install --frozen-lockfile
+
+COPY ./i18n ./i18n/
+COPY ./web ./web/
+
+ARG BUILD_ID
+ENV IMMICH_BUILD=${BUILD_ID}
+
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter immich-web build
+
+FROM sdk AS cli
+
+COPY ./packages/cli/package.json ./packages/cli/package.json
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store pnpm --filter @immich/cli install --frozen-lockfile
+
+COPY ./packages/cli ./packages/cli/
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
+  pnpm --filter @immich/cli build && \
+  pnpm --filter @immich/cli --prod --no-optional deploy /output/cli-pruned
+
+FROM plugin-sdk AS plugins
+
+ARG TARGETPLATFORM
+
+COPY --from=ghcr.io/jdx/mise:2026.11.9@sha256:9a182adba2584a6f5b29ddc1f2c7651c93694a5f829d74452b90214616baacf4 /usr/local/bin/mise /usr/local/bin/mise
+
+COPY ./mise.toml ./mise.toml
+COPY ./mise.lock ./mise.lock
+COPY ./.mise ./.mise
+COPY ./packages/plugin-core/mise.toml ./packages/plugin-core/
+ENV MISE_TRUSTED_CONFIG_PATHS=/usr/src/app/mise.toml
+ENV MISE_DATA_DIR=/buildcache/mise
+ENV MISE_DISABLE_TOOLS=flutter
+RUN --mount=type=cache,id=mise-tools-${TARGETPLATFORM},target=/buildcache/mise \
+  mise install --locked
+COPY ./packages/plugin-core ./packages/plugin-core/
+
+# Build plugins
+RUN --mount=type=cache,id=pnpm,target=/buildcache/pnpm-store \
+  --mount=type=cache,id=mise-tools-${TARGETPLATFORM},target=/buildcache/mise \
+  mise //:plugins
+
+FROM ghcr.io/immich-app/base-server-prod:202611101105@sha256:282c05976d233c7a601199b9be79f6c8260352b37b1d808e96b16fb76cc63270
+
+WORKDIR /usr/src/app
+ENV NODE_ENV=production \
+  NVIDIA_DRIVER_CAPABILITIES=all \
+  NVIDIA_VISIBLE_DEVICES=all
+
+COPY --from=server /output/server-pruned ./server
+COPY --from=web /usr/src/app/web/build /build/www
+COPY --from=cli /output/cli-pruned ./cli
+COPY --from=plugins /usr/src/app/packages/plugin-core/dist /build/plugins/immich-plugin-core/dist
+COPY --from=plugins /usr/src/app/packages/plugin-core/manifest.json /build/plugins/immich-plugin-core/manifest.json
+RUN ln -s ../../cli/bin/immich server/bin/immich
+COPY LICENSE /licenses/LICENSE.txt
+COPY LICENSE /LICENSE
+
+ENV PATH="${PATH}:/usr/src/app/server/bin"
+
+ARG BUILD_ID
+ARG BUILD_IMAGE
+ARG BUILD_SOURCE_REF
+ARG BUILD_SOURCE_COMMIT
+
+ENV IMMICH_BUILD=${BUILD_ID}
+ENV IMMICH_BUILD_URL=https://github.com/daffaroffi/immich-telegram/actions/runs/${BUILD_ID}
+ENV IMMICH_BUILD_IMAGE=${BUILD_IMAGE}
+ENV IMMICH_BUILD_IMAGE_URL=https://github.com/daffaroffi/immich-telegram/pkgs/container/immich-server
+ENV IMMICH_REPOSITORY=daffaroffi/immich-telegram
+ENV IMMICH_REPOSITORY_URL=https://github.com/daffaroffi/immich-telegram
+ENV IMMICH_SOURCE_REF=${BUILD_SOURCE_REF}
+ENV IMMICH_SOURCE_COMMIT=${BUILD_SOURCE_COMMIT}
+ENV IMMICH_SOURCE_URL=https://github.com/daffaroffi/immich-telegram/commit/${BUILD_SOURCE_COMMIT}
+
+COPY --from=ghcr.io/futo-org/backups/restic-proxy:v1.18.1@sha256:8ce6e9ba833c16985d1353cdf06437161322fcd6825cd60f2bb19c4154bacd60 /usr/local/bin/restic-proxy /usr/local/bin/restic-proxy
+COPY --from=ghcr.io/futo-org/restic:0.19.1-futo.2@sha256:72a88670ee0bbb5485c74bd9a7fb3f36d46bf3f8e29c6d0886cd6039077a3184 /usr/bin/restic /usr/local/bin/restic
+
+VOLUME /data
+EXPOSE 2283
+ENTRYPOINT ["tini", "--", "/bin/bash", "-c"]
+CMD ["start.sh"]
+
+HEALTHCHECK CMD immich-healthcheck
