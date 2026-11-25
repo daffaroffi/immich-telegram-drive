@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Continuous Telegram -> Immich mapping.
-# Runs the admin importer for both the storage chat and Saved Messages,
+# Runs the admin importer for the storage chat only (single Telegram target).
 # skipping immutable test artifacts and files too large for the VPS disk.
 # Large media stays in Telegram and is restored on demand by the server.
 set -euo pipefail
@@ -26,7 +26,7 @@ TOKEN=$(curl -s --max-time 10 -X POST "$BASE/api/auth/login" \
 
 [ -n "$TOKEN" ] || { echo "$(date -Is) login failed" >> "$LOG"; exit 1; }
 
-for SOURCE in self chat; do
+for SOURCE in chat; do
   OUT=$(curl -s --max-time 900 -X POST "$BASE/api/admin/telegram/import" \
     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
     -d "{\"limit\":500,\"source\":\"$SOURCE\",\"maxBytes\":60000000}")
